@@ -5,8 +5,13 @@ import java.util.concurrent.TimeUnit
 import akka.actor.ActorSystem
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.model.{HttpRequest, HttpResponse}
-import akka.stream.{ActorMaterializer, OverflowStrategy, QueueOfferResult}
-import akka.stream.scaladsl.{Flow, Keep, Sink, Source}
+import akka.stream.{
+  ActorMaterializer,
+  ClosedShape,
+  OverflowStrategy,
+  QueueOfferResult
+}
+import akka.stream.scaladsl.{Flow, GraphDSL, Keep, Sink, Source}
 
 import scala.concurrent.{Future, Promise}
 import scala.concurrent.duration._
@@ -41,9 +46,13 @@ object HttpClientTest extends App {
     override def postHttpBinding(binding: Http.ServerBinding): Unit = {
       super.postHttpBinding(binding)
       // warmup run followed by actual run
+
       //oneRun.flatMap(_ => oneRun)
 
-      oneInstrRun.flatMap(_ => oneInstrRun)
+      //oneInstrRun.flatMap(_ => oneInstrRun)
+
+      oneStageInstrRun.flatMap(_ => oneStageInstrRun)
+
     }
 
     def oneRun = {
@@ -99,6 +108,33 @@ object HttpClientTest extends App {
 
       res3
     }
+
+    def oneStageInstrRun = {
+      val start1 = System.nanoTime
+      val res1 = stageInstrSingleRequestRun("singleRequest")
+      captureResult(start1, res1, "singleRequest")
+
+      val res2 = res1.flatMap(_ => {
+        val start = System.nanoTime
+        val res = stageInstrCachedPoolRun("cachedPool")
+        captureResult(start, res, "cachedPool")
+        res
+      })
+
+      val res3 = res2.flatMap(_ => {
+        val start = System.nanoTime
+        val res = stageInstrQueuedPoolRun("queuedPool")
+        captureResult(start, res, "queuedPool")
+        res
+      })
+
+      res3.onComplete {
+        case Success(_) => println("Test completed")
+        case Failure(_) => println("Test failed")
+      }
+
+      res3
+    }
   }
 
   println("Starting Server ...")
@@ -110,7 +146,7 @@ object HttpClientTest extends App {
 
     val nRequests = 100
 
-    val mapAsyncFactor = 16
+    val mapAsyncFactor = 8
 
     val superPool = Http().superPool[Int]()
 
@@ -205,6 +241,10 @@ object HttpClientTest extends App {
 //          TimeUnit.NANOSECONDS).toMillis} ms")
     }
 
+    val monitorStageF = (input: Any, output: Any, duration: FiniteDuration) => {
+      println(duration.toMillis)
+    }
+
     def instrSingleRequestRun(name: String) = {
       println(name)
       Source(1 to nRequests)
@@ -223,6 +263,51 @@ object HttpClientTest extends App {
       println(name)
       Source(1 to nRequests)
         .via(instrumentedFlow(name, queueRequestFlow, monitorF))
+        .runWith(Sink.ignore)
+    }
+
+    def stageInstrSingleRequestRun(name: String) = {
+      println(name)
+      Source(1 to nRequests)
+        .via(
+          InstrumentationStage[Int, Int](_.toString, _.toString, monitorStageF)
+            .join(asyncRequestFlow))
+        .runWith(Sink.ignore)
+    }
+
+    def stageInstrCachedPoolRun(name: String) = {
+      println(name)
+
+      Source(1 to nRequests)
+        .via(
+          InstrumentationStage[Int, Int](_.toString, _.toString, monitorStageF)
+            .join(streamRequestFlow))
+        .runWith(Sink.ignore)
+//      GraphDSL.create() { implicit builder =>
+//        import akka.stream.scaladsl.GraphDSL.Implicits._
+//
+//        val instrumentationProxy =
+//          new InstrumentationStage[Int, Int](_.toString,
+//                                             _.toString,
+//                                             monitorStageF)
+//        // format: off
+//        Source(1 to nRequests) ~> instrumentationProxy.in
+//                                  instrumentationProxy.instrumentedFlowIn  ~> streamRequestFlow
+//                                  instrumentationProxy.instrumentedFlowOut <~ streamRequestFlow
+//        Sink.ignore            <~ instrumentationProxy.out
+//
+//        // format: on
+//
+//        ClosedShape
+//      }
+    }
+
+    def stageInstrQueuedPoolRun(name: String) = {
+      println(name)
+      Source(1 to nRequests)
+        .via(
+          InstrumentationStage[Int, Int](_.toString, _.toString, monitorStageF)
+            .join(queueRequestFlow))
         .runWith(Sink.ignore)
     }
 
